@@ -7,7 +7,7 @@ import JWTKit
 import Crypto
 import AsyncHTTPClient
 import NIOFoundationCompat
-import os
+import Logging
 
 struct ChainVerifier {
     
@@ -17,12 +17,12 @@ struct ChainVerifier {
     
     private let store: CertificateStore
     
-    private var logger: os.Logger
+    private var logger: Logger
     
     init(rootCertificates: [Foundation.Data]) throws {
         let parsedCertificates = try rootCertificates.map { try Certificate(derEncoded: [UInt8]($0)) }
         self.store = CertificateStore(parsedCertificates)
-        self.logger = os.Logger(subsystem: "AppStore", category: "ChainVerifier")
+        self.logger = Logger(label: "ChainVerifier")
     }
     
     func verify<T: DecodedSignedData>(signedData: String, type: T.Type, onlineVerification: Bool, environment: Environment) async -> VerificationResult<T> where T: Decodable {
