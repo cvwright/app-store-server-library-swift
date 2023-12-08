@@ -7,6 +7,7 @@ import JWTKit
 import Crypto
 import AsyncHTTPClient
 import NIOFoundationCompat
+import os
 
 struct ChainVerifier {
     
@@ -16,9 +17,12 @@ struct ChainVerifier {
     
     private let store: CertificateStore
     
+    private var logger: os.Logger
+    
     init(rootCertificates: [Foundation.Data]) throws {
         let parsedCertificates = try rootCertificates.map { try Certificate(derEncoded: [UInt8]($0)) }
         self.store = CertificateStore(parsedCertificates)
+        self.logger = os.Logger(subsystem: "AppStore", category: "ChainVerifier")
     }
     
     func verify<T: DecodedSignedData>(signedData: String, type: T.Type, onlineVerification: Bool, environment: Environment) async -> VerificationResult<T> where T: Decodable {
@@ -27,10 +31,17 @@ struct ChainVerifier {
         do {
             let bodySegments = signedData.components(separatedBy: ".")
             if (bodySegments.count != ChainVerifier.EXPECTED_JWT_SEGMENTS) {
+                logger.error("Invalid JWT format: Wrong number of segments")
                 return VerificationResult.invalid(VerificationError.INVALID_JWT_FORMAT)
             }
             let jsonDecoder = getJsonDecoder()
-            guard let headerData = Foundation.Data(base64Encoded: base64URLToBase64(bodySegments[0])), let bodyData = Foundation.Data(base64Encoded: base64URLToBase64(bodySegments[1])) else {
+            guard let headerData = Foundation.Data(base64Encoded: base64URLToBase64(bodySegments[0])) else {
+                logger.error("Failed to decode base64 header")
+                return VerificationResult.invalid(VerificationError.INVALID_JWT_FORMAT)
+            }
+                    
+            guard let bodyData = Foundation.Data(base64Encoded: base64URLToBase64(bodySegments[1])) else {
+                logger.error("Failed to decode base64 body")
                 return VerificationResult.invalid(VerificationError.INVALID_JWT_FORMAT)
             }
             header = try jsonDecoder.decode(JWTHeader.self, from: headerData)
@@ -42,19 +53,26 @@ struct ChainVerifier {
         if (environment == Environment.xcode || environment == Environment.localTesting) {
             // Data is not signed by the App Store, and verification should be skipped
             // The environment MUST be checked in the public method calling this
+            logger.warning("Environment is Xcode or local testing -- Returning 'valid' anyway")
             return VerificationResult.valid(decodedBody)
         }
 
         guard let x5c_header = header.x5c else {
+            logger.error("No X5C header")
             return VerificationResult.invalid(VerificationError.INVALID_JWT_FORMAT)
         }
-        if ChainVerifier.EXPECTED_ALGORITHM != header.alg || x5c_header.count != ChainVerifier.EXPECTED_CHAIN_LENGTH {
+        if ChainVerifier.EXPECTED_ALGORITHM != header.alg {
+            logger.error("Algorithm doesn't match")
             return VerificationResult.invalid(VerificationError.INVALID_JWT_FORMAT)
         }
-        
+        if x5c_header.count != ChainVerifier.EXPECTED_CHAIN_LENGTH {
+            logger.error("Unexpected chain length")
+            return VerificationResult.invalid(VerificationError.INVALID_JWT_FORMAT)
+        }
 
         guard let leaf_der_enocded = Foundation.Data(base64Encoded: x5c_header[0]),
               let intermeidate_der_encoded = Foundation.Data(base64Encoded: x5c_header[1]) else {
+            logger.error("Failed to get der encoded data")
             return VerificationResult.invalid(VerificationError.INVALID_CERTIFICATE)
         }
         do {
@@ -62,32 +80,42 @@ struct ChainVerifier {
             let intermediateCertificate = try Certificate(derEncoded: Array(intermeidate_der_encoded))
             let validationTime = !onlineVerification && decodedBody.signedDate != nil ? decodedBody.signedDate! : Date()
             
+            logger.debug("Verifying chain ...")
             let verificationResult = await verifyChain(leaf: leafCertificate, intermediate: intermediateCertificate, online: onlineVerification, validationTime: validationTime)
             switch verificationResult {
             case .validCertificate(let chain):
+                logger.debug("Got .validCertificate")
                 let leafCertificate = chain.first!
                 guard let publicKey = P256.Signing.PublicKey(leafCertificate.publicKey) else {
+                    logger.error("Couldn't get public key")
                     return VerificationResult.invalid(VerificationError.VERIFICATION_FAILURE)
                 }
                 // Verify using Vapor
+                logger.debug("Verifying body using Vapor")
                 let signers = JWTSigners()
                 try signers.use(.es256(key: .public(pem: publicKey.pemRepresentation)))
                 let verifiedBody: VerificationResult<VaporBody> = try VerificationResult<VaporBody>.valid(signers.verify(signedData))
                 switch verifiedBody {
-                    case .invalid(_):
-                        return VerificationResult.invalid(VerificationError.VERIFICATION_FAILURE)
-                    case .valid(_): break
+                case .invalid(_):
+                    logger.error("Body is invalid")
+                    return VerificationResult.invalid(VerificationError.VERIFICATION_FAILURE)
+                case .valid(_):
+                    logger.debug("Body is valid")
+                    break
                 }
                 return VerificationResult.valid(decodedBody)
             case .couldNotValidate(_):
+                logger.error("Got .couldNotValidate")
                 return VerificationResult.invalid(VerificationError.VERIFICATION_FAILURE)
             }
         } catch {
+            logger.error("Verification failed")
             return VerificationResult.invalid(VerificationError.INVALID_JWT_FORMAT)
         }
     }
     
     func verifyChain(leaf: Certificate, intermediate: Certificate, online: Bool, validationTime: Date) async -> X509.VerificationResult {
+        logger.debug("Verifying chain")
         var verifier = Verifier(rootCertificates: self.store) {
             RFC5280Policy(validationTime: validationTime)
             AppStoreOIDPolicy()
@@ -96,6 +124,7 @@ struct ChainVerifier {
             }
         }
         let intermediateStore = CertificateStore([intermediate])
+        logger.debug("Calling verifier.validate()")
         return await verifier.validate(leafCertificate: leaf, intermediates: intermediateStore)
     }
 }

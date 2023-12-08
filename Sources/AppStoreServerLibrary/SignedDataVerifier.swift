@@ -1,6 +1,7 @@
 // Copyright (c) 2023 Apple Inc. Licensed under MIT License.
 
 import Foundation
+import os
 
 ///A verifier and decoder class designed to decode signed data from the App Store.
 public struct SignedDataVerifier {
@@ -10,6 +11,8 @@ public struct SignedDataVerifier {
     private var environment: Environment
     private var chainVerifier: ChainVerifier
     private var enableOnlineChecks: Bool
+    
+    private var logger: os.Logger
      
     /// - Parameter rootCertificates: The set of Apple Root certificate authority certificates, as found on [Apple PKI](https://www.apple.com/certificateauthority/)
     /// - Parameter bundleId: The: bundle identifier of the app.
@@ -23,6 +26,7 @@ public struct SignedDataVerifier {
         self.environment = environment
         self.chainVerifier = try ChainVerifier(rootCertificates: rootCertificates)
         self.enableOnlineChecks = enableOnlineChecks
+        self.logger = os.Logger(subsystem: "AppStore", category: "SignedDataVerifier")
     }
     /// Verifies and decodes a signedRenewalInfo obtained from the App Store Server API, an App Store Server Notification, or from a device
     ///
